@@ -2,56 +2,50 @@
 Updated: 2026-09-13
 
 #### Current milestone
-Phase 3 complete (Master Data API & Organization Hierarchy Seeded). Ready for Phase 4 (ServiceNow Integration & Case Ingestion).
+Phase 4 complete (Inbound Case Ingestion API with Idempotency). Ready for Phase 5 (Mock Provider System).
 
 #### Implemented
-- Docker Compose baseline with MariaDB 11.4 and FastAPI.
-- Relational hierarchy models with Alembic migrations:
-  hospital_group -> hospital -> facility -> department -> healthcare_service.
-- Synthetic seed data for Sunrise Healthcare Group and Apollo Healthcare Group.
-- Versioned master data endpoints:
-  - GET /health
-  - GET /api/v1/hospital-groups
-  - GET /api/v1/hospitals (supports tenant_id filtering)
-  - GET /api/v1/facilities (supports hospital_id filtering)
-  - GET /api/v1/services (supports department_id filtering)
+- Master Data Service (:8001) with organization hierarchy endpoints.
+- Relational schema with migrations: hospital_group, hospital, facility, department, healthcare_service, case_reference, idempotency_record.
+- Case Integration Service (:8002) with inbound POST /api/v1/cases.
+- Header-based Idempotency (Idempotency-Key) and SHA-256 payload validation.
+- Correlation ID propagation (X-Correlation-ID).
 
 #### Running services
 - master-data-service :8001
+- case-integration-service :8002
 - mariadb :3306 (internal network)
 - adminer :8080 (development UI)
 
 #### ServiceNow status
 - Instance: Not connected / unverified
-- Scoped app: Pending Phase 4
-- Inbound OAuth / REST integration: Pending Phase 4
+- Scoped app: Pending
+- Inbound REST API contract established: POST /api/v1/cases
 
 #### Database status
 - MariaDB version: 11.4
-- Implemented migrations: alembic revision (create organization hierarchy tables)
-- Tables: alembic_version, hospital_group, hospital, facility, department, healthcare_service
+- Tables: alembic_version, hospital_group, hospital, facility, department, healthcare_service, case_reference, idempotency_record
 
 #### API status
-- Implemented endpoints: /health, /api/v1/hospital-groups, /api/v1/hospitals, /api/v1/facilities, /api/v1/services
-- OpenAPI location: http://localhost:8001/docs
+- Endpoints:
+  - GET :8001/health
+  - GET :8001/api/v1/hospital-groups
+  - GET :8001/api/v1/hospitals
+  - GET :8001/api/v1/facilities
+  - GET :8001/api/v1/services
+  - GET :8002/health
+  - POST :8002/api/v1/cases
 
 #### Integration status
-- ServiceNow -> FastAPI: Pending
-- FastAPI -> ServiceNow: Pending
-- FastAPI -> Provider: Pending
+- ServiceNow -> FastAPI: Contract implemented (Inbound case ingestion)
+- FastAPI -> Provider: Pending (Phase 5)
 - Outbox / Retry / Dead letter: Pending (Phase 6)
-- Idempotency: Pending (Phase 6)
+- Idempotency: Implemented and verified
 
 #### Tests
-- Last test command: docker compose exec master-data-service pytest -v
-- Result: Passing
-
-#### Known issues
-None.
-
-#### Open questions
-- ServiceNow PDI (Personal Developer Instance) release version and inbound OAuth client configuration.
+- Result: Passing (tests/test_health.py, tests/test_master_data.py, tests/test_case_ingestion.py)
 
 #### Active ADRs
-- ADR-001 (Service Boundaries) - Draft/Pending
+- ADR-001 (Service Boundaries) - Accepted
 - ADR-006 (Hospital Group as Tenant Boundary) - Accepted
+- ADR-009 (Idempotency Strategy) - Accepted

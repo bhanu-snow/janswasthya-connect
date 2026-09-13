@@ -53,5 +53,24 @@ services:
     volumes:
       - ./services/master-data-service:/app
 
+  case-integration-service:
+    build:
+      context: ./services/case-integration-service
+      dockerfile: Dockerfile
+
+    ports:
+      - "8002:8002"
+
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app
+    depends_on:
+      mariadb:
+        condition: service_healthy
+
+    volumes:
+      - ./services/case-integration-service:/app
+
 volumes:
   mariadb_data:
