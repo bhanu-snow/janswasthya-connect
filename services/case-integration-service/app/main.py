@@ -72,7 +72,9 @@ def ingest_case(
         "hospital_id": new_case.hospital_id,
         "service_code": new_case.service_code,
         "tenant_id": new_case.tenant_id,
-        "correlation_id": correlation_id
+        "correlation_id": correlation_id,
+        "case_created_at": new_case.created_at.isoformat(),
+        "case_updated_at": new_case.updated_at.isoformat(),
     }
     outbox_entry = OutboxEvent(
         tenant_id=payload.tenant_id,
