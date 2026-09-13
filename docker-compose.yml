@@ -107,6 +107,7 @@ services:
     environment:
       - PYTHONPATH=/app
       - PROVIDER_BASE_URL=http://mock-provider-system:9000
+      - ANALYTICS_SERVICE_URL=http://analytics-service:8003
       - POLL_INTERVAL_SECONDS=3
       - MAX_RETRIES=3
     depends_on:

@@ -8,5 +8,6 @@ DB_NAME = os.getenv("DB_NAME", "janswasthya")
 
 DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?charset=utf8mb4"
 PROVIDER_BASE_URL = os.getenv("PROVIDER_BASE_URL", "http://mock-provider-system:9000")
+ANALYTICS_SERVICE_URL = os.getenv("ANALYTICS_SERVICE_URL", "http://analytics-service:8003")
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "3"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))

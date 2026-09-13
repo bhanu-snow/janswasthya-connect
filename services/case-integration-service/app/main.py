@@ -76,7 +76,8 @@ def ingest_case(
         "case_created_at": new_case.created_at.isoformat(),
         "case_updated_at": new_case.updated_at.isoformat(),
     }
-    outbox_entry = OutboxEvent(
+
+    provider_outbox_entry = OutboxEvent(
         tenant_id=payload.tenant_id,
         aggregate_type="CaseReference",
         aggregate_id=new_case.id,
@@ -85,14 +86,26 @@ def ingest_case(
         status="PENDING",
         correlation_id=correlation_id
     )
-    db.add(outbox_entry)
+
+    analytics_outbox_entry = OutboxEvent(
+        tenant_id=payload.tenant_id,
+        aggregate_type="CaseReference",
+        aggregate_id=new_case.id,
+        event_type="CASE_ACCEPTED_FOR_ANALYTICS",
+        payload=json.dumps(outbox_payload),
+        status="PENDING",
+        correlation_id=correlation_id
+    )
+
+    db.add(provider_outbox_entry)
+    db.add(analytics_outbox_entry)
     
     response_data = {
         "case_reference_id": new_case.id,
         "case_number": new_case.case_number,
         "status": new_case.status,
         "correlation_id": new_case.correlation_id,
-        "message": "Case successfully received and registered."
+        "message": "Case successfully received and registered and stored for analytics usage as well."
     }
 
     # 5. Record Idempotency and Commit Transaction
