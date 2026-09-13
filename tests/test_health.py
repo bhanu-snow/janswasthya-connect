@@ -1,8 +1,7 @@
-from fastapi.testclient import TestClient
 import sys
 import os
+from fastapi.testclient import TestClient
 
-# Add service directory to path for test runner
 sys.path.insert(0, os.path.abspath("services/master-data-service"))
 from app.main import app
 

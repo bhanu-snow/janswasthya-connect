@@ -1,0 +1,11 @@
+services:
+  master-data-service:
+    build:
+      context: ./services/master-data-service
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    volumes:
+      - ./services/master-data-service/app:/app/app
