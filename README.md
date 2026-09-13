@@ -1,55 +1,80 @@
 # JanSwasthya Connect
 
-Production-style healthcare integration and analytics platform built as a focused MVP for learning and demonstrating Solution Architecture, integration reliability, persistence portability, and AI/MCP readiness.
+**JanSwasthya Connect** is a production-style healthcare integration and
+analytics MVP built to demonstrate practical Solution Architecture:
+domain boundaries, multi-tenant modelling, REST integration,
+transactional outbox, asynchronous workers, idempotency, correlation,
+retries/DLQ, analytics persistence portability, and future MCP
+readiness.
 
-## Current Status
+> **Current checkpoint: ServiceNow integration verified end-to-end
+> against a live ServiceNow Personal Developer Instance (PDI).**
 
-**Phase 7 — Analytics Service & Persistence Portability**
+## What is actually working
 
-The core healthcare case-ingestion and integration foundation is implemented. Analytics is now integrated into the existing asynchronous outbox/worker flow and has been verified end-to-end.
+The core path has been exercised, not only designed:
 
-The immediate next step is to finish analytics reliability testing and then move quickly to the ServiceNow implementation.
-
-## Architecture
-
-```text
-                         ServiceNow
-                             |
-                         REST / HTTPS
-                             |
-                             v
-                 case-integration-service
-                             |
-                    Atomic Transaction
-                             |
-              +--------------+--------------+
-              |                             |
-              v                             v
-        CaseReference                  Outbox Events
-                                            |
-                         +------------------+------------------+
-                         |                                     |
-                         v                                     v
-             CASE_ACCEPTED_FOR_DISPATCH          CASE_ACCEPTED_FOR_ANALYTICS
-                         |                                     |
-                         +------------------+------------------+
-                                            |
-                                            v
-                                  integration-worker
-                                      |         |
-                                      v         v
-                              Mock Provider   Analytics
-                                                Service
-                                                   |
-                                                   v
-                                         healthcare_case_fact
+``` text
+ServiceNow Incident
+       |
+       | Async Business Rule
+       | RESTMessageV2 / HTTPS
+       v
+Cloudflare HTTPS endpoint
+       |
+       v
+case-integration-service :8002
+       |
+       +--> CaseReference
+       |
+       +--> OutboxEvent
+               |
+               +--> CASE_ACCEPTED_FOR_DISPATCH
+               |
+               +--> CASE_ACCEPTED_FOR_ANALYTICS
+                              |
+                              v
+                    integration-worker
+                       |             |
+                       v             v
+                Mock Provider   analytics-service :8003
+                                     |
+                                     v
+                             healthcare_case_fact
 ```
 
-## Domain / Tenant Model
+The ServiceNow-to-API leg was verified using an actual Incident record.
+The resulting `case_reference` row was verified in MariaDB/Adminer.
+
+## Current status
+
+  Capability                             Status
+  -------------------------------------- --------------
+  Repository / Docker baseline           COMPLETE
+  Master Data Service                    COMPLETE
+  Case Integration Service               COMPLETE
+  Idempotency                            COMPLETE
+  Correlation IDs                        COMPLETE
+  Transactional Outbox                   COMPLETE
+  Integration audit records              COMPLETE
+  Bounded retries                        COMPLETE
+  Dead-letter persistence                COMPLETE
+  Mock Provider System                   COMPLETE
+  Analytics Service                      COMPLETE
+  Analytics persistence port             COMPLETE
+  Analytics end-to-end fan-out           COMPLETE
+  ServiceNow Incident → JanSwasthya      **VERIFIED**
+  ServiceNow lifecycle synchronization   NEXT
+  True exponential backoff               HARDENING
+  Tenant authorization hardening         PENDING
+  Production authentication              PENDING
+  MCP server                             FUTURE
+
+## Domain / tenant model
 
 The primary tenant is the **Hospital Group**.
 
-```text
+``` text
 Hospital Group
     |
     +-- Hospital
@@ -61,258 +86,188 @@ Hospital Group
                       +-- Healthcare Service
 ```
 
-Tenant context is intended to be derived from authenticated identity and server-side authorization rather than blindly trusting a client-supplied `tenant_id`.
+Tenant context should ultimately be derived from authenticated identity
+and server-side authorization rather than trusted directly from a
+client-supplied `tenant_id`.
 
 ## Services
 
 ### Master Data Service
 
-Location:
-
-```text
+``` text
 services/master-data-service/
 ```
 
-Current responsibility:
+Owns:
 
-- Hospital Group
-- Hospital
-- Facility
-- Department
-- Healthcare Service
+-   Hospital Group
+-   Hospital
+-   Facility
+-   Department
+-   Healthcare Service
 
-Runtime port:
-
-```text
-8001
-```
+Port: `8001`
 
 ### Case Integration Service
 
-Location:
-
-```text
+``` text
 services/case-integration-service/
 ```
 
-Current responsibility:
+Owns the healthcare case ingestion boundary and integration reliability
+state.
 
-- Receive healthcare case requests.
-- Validate requests.
-- Enforce idempotency.
-- Generate/propagate correlation IDs.
-- Persist `CaseReference`.
-- Create reliable outbox events.
-- Maintain the transactional boundary between business state and outbox state.
+Responsibilities:
 
-Runtime port:
+-   request validation
+-   idempotency
+-   correlation ID handling
+-   `CaseReference` persistence
+-   atomic outbox creation
+-   integration message/attempt auditing
+-   dead-letter persistence
 
-```text
-8002
-```
+Port: `8002`
 
-Current endpoint:
+Endpoint:
 
-```text
+``` http
 POST /api/v1/cases
 ```
 
-The request requires:
+Required header:
 
-```text
+``` text
 Idempotency-Key
 ```
 
-An optional:
+Optional header:
 
-```text
+``` text
 X-Correlation-ID
 ```
 
-can be supplied and is propagated through downstream processing.
-
 ### Analytics Service
 
-Location:
-
-```text
+``` text
 services/analytics-service/
 ```
 
-Current responsibility:
+Port: `8003`
 
-- Receive analytics case facts.
-- Persist healthcare case facts.
-- Provide a persistence port for future database portability.
-- Support idempotent create/update behavior by `case_reference_id`.
+Endpoints:
 
-Runtime port:
-
-```text
-8003
-```
-
-Health endpoint:
-
-```text
-GET /health
-```
-
-Analytics endpoint:
-
-```text
+``` http
+GET  /health
 POST /api/v1/analytics/cases
 ```
 
 Primary table:
 
-```text
+``` text
 healthcare_case_fact
 ```
 
+The analytics service uses a repository/port boundary so the application
+service does not depend directly on MariaDB-specific persistence.
+
 ### Integration Worker
 
-Location:
-
-```text
+``` text
 workers/integration-worker/
 ```
 
-The existing worker is reused for downstream integrations.
+The existing worker is reused for downstream processing.
 
-It currently processes:
+It routes:
 
-```text
+``` text
 CASE_ACCEPTED_FOR_DISPATCH
 CASE_ACCEPTED_FOR_ANALYTICS
 ```
 
-The worker routes each event to its appropriate adapter.
-
-Current adapters:
-
-```text
-workers/integration-worker/app/adapters/mock_provider.py
-workers/integration-worker/app/adapters/analytics.py
-```
+through separate adapters.
 
 ### Mock Provider System
 
-Location:
-
-```text
-services/mock-provider-system/
+``` text
+mock-systems/mock-provider-system/
 ```
 
-Used to simulate an external healthcare provider system and exercise the integration boundary.
+Port: `9000`
 
-Runtime port:
+It provides a synthetic external healthcare provider boundary and
+controlled failure simulation for reliability testing.
 
-```text
-9000
-```
+## Reliability architecture
 
-Current provider integration includes appointment dispatch.
+The case transaction creates two independent downstream events:
 
-## Analytics Persistence Architecture
-
-Analytics persistence uses a repository/port boundary.
-
-```text
-AnalyticsService
-       |
-       v
-CaseAnalyticsRepository
-       |
-       v
-MariaDBCaseAnalyticsRepository
-       |
-       v
-MariaDB
-```
-
-The application service does not directly depend on MariaDB-specific persistence implementation.
-
-The current database is MariaDB.
-
-Future adapters may target PostgreSQL or an analytical database such as ClickHouse if justified.
-
-Portability means the application boundary is prepared for another persistence implementation; it does not imply a zero-effort database migration.
-
-## Analytics Fact
-
-Current `healthcare_case_fact` fields:
-
-```text
-id
-tenant_id
-case_reference_id
-hospital_id
-service_code
-status
-case_created_at
-case_updated_at
-ingested_at
-```
-
-`case_reference_id` is unique.
-
-When the same case is received again:
-
-- The existing analytics fact is located.
-- Its status and update timestamp are updated.
-- Its fact ID is preserved.
-
-This provides idempotent analytics ingestion behavior.
-
-## Reliability Architecture
-
-The integration foundation uses:
-
-- Idempotency
-- Correlation IDs
-- Atomic outbox writes
-- Integration message auditing
-- Integration attempt auditing
-- Bounded retries
-- Dead-letter persistence
-- Independent downstream event state
-
-The case transaction creates independent events:
-
-```text
+``` text
 CASE_ACCEPTED_FOR_DISPATCH
 CASE_ACCEPTED_FOR_ANALYTICS
 ```
 
 This is deliberate.
 
-If provider delivery succeeds but analytics fails:
+If analytics is unavailable while provider delivery succeeds:
 
-```text
-Provider Event       -> PROCESSED
-Analytics Event      -> RETRY / DEAD_LETTER
+``` text
+Provider event   -> PROCESSED
+Analytics event  -> RETRY -> DEAD_LETTER
 ```
 
-The provider operation does not need to be repeated merely because analytics processing failed.
+The provider operation does not need to be repeated because analytics
+failed.
 
-## Current Database
+Current reliability mechanisms:
 
-The MVP currently uses a shared MariaDB instance.
+-   Idempotency keys
+-   Payload hash validation for idempotency-key reuse
+-   Correlation IDs
+-   Atomic outbox writes
+-   Integration messages
+-   Integration attempts
+-   Bounded retries
+-   Dead-letter persistence
+-   Independent downstream event state
 
-This is an intentional simplification for the current learning and implementation stage.
+**Known hardening item:** the current worker retry mechanism is bounded
+but does not yet implement true exponential backoff.
 
-Logical service boundaries are maintained even though services currently share the database instance.
+## Analytics persistence portability
 
-A future database-per-service experiment can be evaluated separately.
+Current:
 
-## Database Migrations
+``` text
+AnalyticsService
+      |
+      v
+CaseAnalyticsRepository
+      |
+      v
+MariaDBCaseAnalyticsRepository
+      |
+      v
+MariaDB
+```
 
-Operational services use the existing Alembic migration history.
+Future adapters can target PostgreSQL or an analytical store such as
+ClickHouse.
 
-Actual current operational migration history includes:
+The architectural goal is portability at the application boundary; it
+does **not** claim that a database migration is zero-effort.
 
-```text
+## Database
+
+The MVP intentionally uses one shared MariaDB instance.
+
+This is a learning and implementation simplification. Logical service
+boundaries are maintained even though the physical database is shared.
+
+Operational migration history:
+
+``` text
 2a5d2593a683  create_master_data_tables
 f7629d3baf9f  add_case_reference_and_idempotency
 0e943d03e523  add_outbox_and_reliability_tables
@@ -320,23 +275,119 @@ f7629d3baf9f  add_case_reference_and_idempotency
 
 Analytics has an independent Alembic version table:
 
-```text
+``` text
 analytics_alembic_version
 ```
 
 Analytics migration:
 
-```text
+``` text
 b8b6e31bf5a3_create_healthcare_case_fact
 ```
 
-This prevents the analytics migration process from attempting to manage operational tables in the shared database.
+## ServiceNow integration --- verified
 
-## Docker Compose
+ServiceNow is the operational case system of record.
 
-Current Compose services:
+The current PDI integration uses:
 
-```text
+``` text
+ServiceNow Incident
+    |
+    | Async Business Rule
+    v
+RESTMessageV2
+    |
+    | HTTPS
+    v
+Cloudflare Quick Tunnel
+    |
+    v
+case-integration-service
+```
+
+### Verified live Incident
+
+A real ServiceNow Incident was created with:
+
+``` text
+INC0010002_BHANU_ASYNC
+```
+
+The ServiceNow activity stream recorded:
+
+``` text
+JanSwasthya integration
+HTTP Status: 201
+```
+
+The API response contained:
+
+``` text
+status: ACCEPTED
+case_number: INC0010002_BHANU_ASYNC
+```
+
+and a JanSwasthya `case_reference_id`.
+
+The same Incident was then visible in MariaDB/Adminer in the
+`case_reference` table with:
+
+``` text
+case_number:
+INC0010002_BHANU_ASYNC
+
+servicenow_sys_id:
+2010e83d3d7471011e7faa6feaad3c2
+
+tenant_id:
+830f21a0-3285-4697-b570-ccb0bdf33191
+
+hospital_id:
+3abf0419-1f03-4c98-8f2e-012a581e7497
+```
+
+This is the strongest current integration proof because it demonstrates
+an actual ServiceNow record crossing the integration boundary and being
+persisted by JanSwasthya Connect.
+
+A second ServiceNow-side script invocation was also successfully tested
+earlier using `RESTMessageV2`.
+
+See:
+
+``` text
+docs/07_SERVICENOW_INTEGRATION_VERIFICATION.md
+```
+
+for the reproducible contract, configuration, evidence, and current
+limitations.
+
+## Cloudflare development endpoint
+
+For the current local development setup:
+
+``` text
+ServiceNow
+    |
+    v
+Cloudflare Quick Tunnel
+    |
+    v
+Windows host :8002
+    |
+    v
+Docker case-integration-service
+```
+
+The Quick Tunnel is intentionally a development mechanism. It is not
+treated as a production ingress design.
+
+## Docker runtime
+
+Compose services:
+
+``` text
 mariadb
 mock-provider-system
 integration-worker
@@ -346,9 +397,9 @@ analytics-service
 case-integration-service
 ```
 
-Application ports:
+Ports:
 
-```text
+``` text
 Master Data Service       :8001
 Case Integration Service  :8002
 Analytics Service        :8003
@@ -358,191 +409,68 @@ Adminer                   :8080
 
 MariaDB remains internal to the Docker network.
 
-## End-to-End Verification
+## Verification philosophy
 
-A synthetic case has been successfully processed through the analytics path.
+The repository is intended to show both **implementation** and
+**evidence**.
 
-Example:
+Useful evidence should be reproducible from:
 
-```text
-Case:
-CS-ANALYTICS-003
+1.  source code and configuration in the repository
+2.  database state visible through MariaDB/Adminer
+3.  ServiceNow Incident activity and configuration
+4.  API responses
+5.  integration/outbox audit state
+6.  automated tests where available
 
-Hospital:
-Sunrise Hospital Kanpur
-
-Service:
-CARD-OPD
-
-Status:
-ACCEPTED
-
-Correlation ID:
-corr-analytics-test-003
-```
-
-Verified:
-
-```text
-CASE_ACCEPTED_FOR_DISPATCH
-    -> PROCESSED
-    -> retry_count = 0
-
-CASE_ACCEPTED_FOR_ANALYTICS
-    -> PROCESSED
-    -> retry_count = 0
-```
-
-The corresponding `healthcare_case_fact` was successfully created.
-
-Therefore the current verified path is:
-
-```text
-Case API
-    |
-    v
-CaseReference
-    |
-    v
-Atomic Outbox
-    |
-    +-------------------------+
-    |                         |
-    v                         v
-Provider Event          Analytics Event
-    |                         |
-    v                         v
-Integration Worker      Integration Worker
-    |                         |
-    v                         v
-Mock Provider           Analytics Service
-                              |
-                              v
-                     healthcare_case_fact
-```
+The latest ServiceNow verification is documented rather than presented
+as an architectural assumption.
 
 ## Testing
 
-Analytics service tests currently cover:
+Current automated coverage includes service-level tests for:
 
-- Health endpoint.
-- New analytics fact creation.
-- Existing analytics fact update.
-- Fact ID preservation during update.
+-   analytics health
+-   analytics fact creation
+-   existing fact update
+-   fact ID preservation
+-   mock provider behavior
 
-Runtime verification has also confirmed:
+Runtime verification has also covered:
 
-- Analytics service starts successfully.
-- Analytics health endpoint responds.
-- Analytics API accepts case facts.
-- Duplicate case ingestion updates the existing fact.
-- Worker can reach the analytics service over the Docker network.
-- Case integration creates both provider and analytics outbox events.
-- Both events can be processed successfully.
+-   case creation
+-   idempotency
+-   correlation propagation
+-   outbox creation
+-   provider dispatch
+-   analytics dispatch
+-   analytics fact persistence
+-   analytics failure → retry → dead-letter behavior
+-   ServiceNow Incident → Case Integration Service
 
-## Current Limitations
+## Known limitations
 
-The following are intentionally not complete yet:
+These are deliberately visible rather than hidden:
 
-- Full analytics failure/retry testing.
-- Timeout/unavailability testing.
-- Dead-letter replay testing.
-- Automated worker integration tests.
-- Analytics reconciliation.
-- ServiceNow external-instance integration.
-- Full tenant authorization enforcement.
-- MCP server.
-- Production authentication/authorization hardening.
-- Production observability stack.
+-   ServiceNow tenant/hospital/service mapping is currently hardcoded
+    for the MVP demonstration.
+-   The case API still accepts `tenant_id` in the request model;
+    authenticated tenant derivation is a security-hardening task.
+-   Current worker retries are bounded but not true exponential backoff.
+-   Cloudflare Quick Tunnel is temporary and unauthenticated.
+-   ServiceNow authentication hardening (OAuth 2.0 / least privilege) is
+    still pending.
+-   Async Business Rule implementation is a working MVP integration
+    mechanism; a production design should keep the trigger thin and
+    avoid unnecessary `current.update()` patterns.
+-   Analytics reconciliation and dashboard read models are not complete.
+-   MCP is not implemented.
 
-The current worker retry mechanism is bounded, but exponential backoff has not yet been fully implemented. This remains part of reliability hardening rather than being treated as complete.
+## Architecture style
 
-## ServiceNow Direction
+The project uses a pragmatic Hexagonal / Ports-and-Adapters approach:
 
-ServiceNow is intended to remain the operational case system of record.
-
-Target architecture:
-
-```text
-ServiceNow
-    |
-    | REST / HTTPS
-    v
-case-integration-service
-    |
-    v
-Application / Domain Logic
-    |
-    +-- MariaDB
-    |
-    +-- Outbox
-```
-
-The integration should use:
-
-- REST/HTTPS.
-- OAuth 2.0 where supported by the target deployment.
-- Least-privilege access.
-- Explicit API contracts.
-- Correlation IDs.
-- Idempotency.
-- Timeouts.
-- Schema validation.
-- Controlled retries.
-
-ServiceNow-specific table names, fields, plugins, licensing, and release-specific behavior will be verified against the actual target instance before implementation.
-
-## MCP Direction
-
-MCP is a future application-facing boundary.
-
-Target architecture:
-
-```text
-LLM / Agent
-      |
-      v
-MCP Server
-      |
-      v
-Application Services
-      |
-      v
-Authorization
-      |
-      v
-Domain
-      |
-      v
-Repositories / External Adapters
-```
-
-MCP will not:
-
-- Access MariaDB directly.
-- Bypass authorization.
-- Duplicate business logic.
-- Replace REST APIs.
-
-Initial candidate read capabilities include:
-
-```text
-search_hospitals
-get_hospital
-list_healthcare_services
-get_case_status
-check_appointment_status
-get_referral_status
-get_document_request_status
-```
-
-MCP implementation will follow stabilization of the REST and application boundaries.
-
-## Architecture Style
-
-The project follows a pragmatic Hexagonal / Ports-and-Adapters approach:
-
-```text
+``` text
 API
  |
  v
@@ -558,28 +486,20 @@ Port
 Infrastructure Adapter
 ```
 
-The goal is to maintain useful architectural boundaries without introducing unnecessary abstraction.
+The intent is to preserve meaningful boundaries without introducing
+infrastructure that the MVP does not need.
 
-Current examples include:
+## Project structure
 
-- Repository ports.
-- Provider adapter ports.
-- HTTP integration adapters.
-- Application services.
-- Pydantic API DTOs.
-- Outbox-based asynchronous integration.
-
-## Project Structure
-
-High-level structure:
-
-```text
+``` text
 janswasthya-connect/
 |
 +-- services/
 |   +-- master-data-service/
 |   +-- case-integration-service/
 |   +-- analytics-service/
+|
++-- mock-systems/
 |   +-- mock-provider-system/
 |
 +-- workers/
@@ -587,97 +507,42 @@ janswasthya-connect/
 |
 +-- docs/
 |   +-- 06_CURRENT_STATE.md
+|   +-- 07_SERVICENOW_INTEGRATION_VERIFICATION.md
 |
++-- tests/
 +-- docker-compose.yml
-|
 +-- README.md
 ```
 
-## Immediate Next Steps
+## Documentation
 
-The implementation priority is intentionally short and execution-focused.
+  --------------------------------------------------------------------------------------
+  Document                                           Purpose
+  -------------------------------------------------- -----------------------------------
+  `docs/06_CURRENT_STATE.md`                         Current implementation checkpoint,
+                                                     verified state, limitations, and
+                                                     next work
 
-### 1. Finalize Analytics
+  `docs/07_SERVICENOW_INTEGRATION_VERIFICATION.md`   Live ServiceNow integration
+                                                     configuration and evidence
 
-Complete:
+  `README.md`                                        Project overview and architecture
+                                                     entry point
+  --------------------------------------------------------------------------------------
 
-- Analytics HTTP 500 test.
-- Analytics timeout/unavailability test.
-- Retry behavior verification.
-- Dead-letter behavior.
-- Recovery and replay.
-- Correlation/audit verification.
-- Worker automated tests.
-- Confirm current retry/backoff behavior and improve it where required.
-- Update current-state documentation.
-- Commit and push a clean analytics checkpoint.
+The documentation directory is intentionally being brought back into
+sync with the implementation. New architecture/ADR documents should be
+added as the corresponding design decisions are finalized rather than
+creating speculative documentation.
 
-### 2. Move Quickly to ServiceNow
+## Next steps
 
-After the analytics checkpoint:
-
-- Verify the target ServiceNow instance.
-- Define the inbound/outbound contract.
-- Confirm authentication mechanism.
-- Create/configure the required ServiceNow application boundary.
-- Implement the REST integration.
-- Map ServiceNow case data to the existing case model.
-- Preserve idempotency and correlation semantics.
-- Test ServiceNow -> Case Integration Service.
-- Test case lifecycle synchronization.
-- Add failure/retry handling around the real integration.
-
-### 3. Analytics / Reconciliation
-
-After ServiceNow integration:
-
-- Define analytics read models.
-- Add aggregate queries.
-- Add reconciliation between operational case state and analytics facts.
-- Identify missing, delayed, or failed analytics events.
-
-### 4. MCP
-
-Only after the core application capabilities are stable:
-
-- Define MCP server boundary.
-- Define tool contracts.
-- Add authorization.
-- Expose selected application capabilities.
-- Test tenant isolation and failure behavior.
-
-## Current Status
-
-```text
-Foundation                         COMPLETE
-Master Data Service                COMPLETE
-Case Integration Service           COMPLETE
-Outbox Reliability Foundation      COMPLETE
-Mock Provider Integration          COMPLETE
-Analytics Service                  COMPLETE
-Analytics Persistence Port         COMPLETE
-Analytics End-to-End Flow          COMPLETE
-Analytics Reliability Testing      NEXT
-Analytics Reconciliation           NEXT
-ServiceNow Integration             NEXT
-Tenant Authorization Hardening     PENDING
-MCP Server                         FUTURE
-Architecture Documentation         IN PROGRESS
-```
-
-## Definition of Done for Current Milestone
-
-The analytics milestone will be considered complete when:
-
-- Case events reach analytics facts.
-- Duplicate analytics events do not create duplicate facts.
-- Provider and analytics processing have independent retry state.
-- Analytics failures are retried.
-- Retry exhaustion creates a dead-letter record.
-- Recovered analytics events can be replayed safely.
-- Correlation IDs are traceable.
-- Integration attempts are auditable.
-- Automated worker tests cover the analytics path.
-- Analytics behavior is documented.
-
-Once this checkpoint is complete, implementation priority moves directly to the ServiceNow integration.
+1.  ServiceNow lifecycle synchronization.
+2.  Improve worker retry/backoff semantics.
+3.  Add stronger automated worker integration tests.
+4.  Add analytics aggregation and reconciliation.
+5.  Harden tenant authorization.
+6.  Replace development ingress/authentication with production-grade
+    controls.
+7.  Define MCP tools over stable application services.
+8.  Complete ADR and security/threat-model documentation.
