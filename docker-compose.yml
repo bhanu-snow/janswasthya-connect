@@ -1,11 +1,57 @@
 services:
+  mariadb:
+    image: mariadb:11.4
+    restart: unless-stopped
+
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MARIADB_DATABASE: ${DB_NAME}
+      MARIADB_USER: ${DB_USER}
+      MARIADB_PASSWORD: ${DB_PASSWORD}
+
+    volumes:
+      - mariadb_data:/var/lib/mysql
+
+    healthcheck:
+      test:
+        - CMD
+        - mariadb-admin
+        - ping
+        - -h
+        - localhost
+        - -u
+        - root
+        - -p${DB_ROOT_PASSWORD}
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+  adminer:
+    image: adminer:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+
   master-data-service:
     build:
       context: ./services/master-data-service
       dockerfile: Dockerfile
+
     ports:
       - "8001:8001"
+
     env_file:
       - .env
+
+    depends_on:
+      mariadb:
+        condition: service_healthy
+
     volumes:
-      - ./services/master-data-service/app:/app/app
+      - ./services/master-data-service:/app
+
+volumes:
+  mariadb_data:
