@@ -72,5 +72,16 @@ services:
     volumes:
       - ./services/case-integration-service:/app
 
+  mock-provider-system:
+    build:
+      context: ./mock-systems/mock-provider-system
+      dockerfile: Dockerfile
+    ports:
+      - "9000:9000"
+    environment:
+      - PYTHONPATH=/app
+    volumes:
+      - ./mock-systems/mock-provider-system:/app
+
 volumes:
   mariadb_data:
