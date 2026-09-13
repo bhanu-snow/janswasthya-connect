@@ -72,6 +72,21 @@ services:
     volumes:
       - ./services/case-integration-service:/app
 
+  analytics-service:
+    build:
+      context: ./services/analytics-service
+    container_name: janswasthya-analytics-service
+    environment:
+      DB_USER: ${DB_USER:-janswasthya_user}
+      DB_PASSWORD: ${DB_PASSWORD:-janswasthya_pass}
+      DB_HOST: mariadb
+      DB_PORT: 3306
+      DB_NAME: ${DB_NAME:-janswasthya}
+    ports:
+      - "8003:8003"
+    depends_on:
+      - mariadb
+
   mock-provider-system:
     build:
       context: ./mock-systems/mock-provider-system
