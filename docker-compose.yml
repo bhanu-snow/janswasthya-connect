@@ -83,5 +83,25 @@ services:
     volumes:
       - ./mock-systems/mock-provider-system:/app
 
+  integration-worker:
+    build:
+      context: ./workers/integration-worker
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app
+      - PROVIDER_BASE_URL=http://mock-provider-system:9000
+      - POLL_INTERVAL_SECONDS=3
+      - MAX_RETRIES=3
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      mock-provider-system:
+        condition: service_started
+    volumes:
+      - ./workers/integration-worker:/app
+
 volumes:
   mariadb_data:
+

@@ -6,7 +6,7 @@ from fastapi import FastAPI, Header, HTTPException, Depends, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import CaseReference, IdempotencyRecord
+from app.models import CaseReference, IdempotencyRecord, OutboxEvent
 from app.schemas import InboundCaseCreate, InboundCaseResponse
 
 app = FastAPI(
@@ -65,6 +65,26 @@ def ingest_case(
     db.add(new_case)
     db.flush()
 
+    # 4. Atomic Outbox Enqueue
+    outbox_payload = {
+        "case_id": new_case.id,
+        "case_number": new_case.case_number,
+        "hospital_id": new_case.hospital_id,
+        "service_code": new_case.service_code,
+        "tenant_id": new_case.tenant_id,
+        "correlation_id": correlation_id
+    }
+    outbox_entry = OutboxEvent(
+        tenant_id=payload.tenant_id,
+        aggregate_type="CaseReference",
+        aggregate_id=new_case.id,
+        event_type="CASE_ACCEPTED_FOR_DISPATCH",
+        payload=json.dumps(outbox_payload),
+        status="PENDING",
+        correlation_id=correlation_id
+    )
+    db.add(outbox_entry)
+    
     response_data = {
         "case_reference_id": new_case.id,
         "case_number": new_case.case_number,
@@ -73,7 +93,7 @@ def ingest_case(
         "message": "Case successfully received and registered."
     }
 
-    # 4. Record Idempotency
+    # 5. Record Idempotency and Commit Transaction
     idem_record = IdempotencyRecord(
         key=idempotency_key,
         tenant_id=payload.tenant_id,

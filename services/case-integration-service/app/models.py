@@ -30,3 +30,19 @@ class CaseReference(Base):
     correlation_id = Column(String(64), nullable=False, unique=True, index=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+# Atomic Outbox Enqueue
+class OutboxEvent(Base):
+    __tablename__ = "outbox_event"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    tenant_id = Column(String(36), nullable=False, index=True)
+    aggregate_type = Column(String(50), nullable=False)
+    aggregate_id = Column(String(36), nullable=False, index=True)
+    event_type = Column(String(100), nullable=False)
+    payload = Column(Text, nullable=False)
+    status = Column(String(30), nullable=False, default="PENDING", index=True)
+    retry_count = Column(Integer, nullable=False, default=0)
+    correlation_id = Column(String(64), nullable=False, index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    processed_at = Column(DateTime, nullable=True)
