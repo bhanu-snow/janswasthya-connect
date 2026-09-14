@@ -1,548 +1,835 @@
 # JanSwasthya Connect
 
-**JanSwasthya Connect** is a production-style healthcare integration and
-analytics MVP built to demonstrate practical Solution Architecture:
-domain boundaries, multi-tenant modelling, REST integration,
-transactional outbox, asynchronous workers, idempotency, correlation,
-retries/DLQ, analytics persistence portability, and future MCP
-readiness.
+Production-style healthcare integration and analytics MVP demonstrating how **ServiceNow operational workflows can be connected reliably to external healthcare/provider systems**.
 
-> **Current checkpoint: ServiceNow integration verified end-to-end
-> against a live ServiceNow Personal Developer Instance (PDI).**
+The project focuses on a practical enterprise architecture rather than adding infrastructure for its own sake.
 
-## What is actually working
+> **ServiceNow manages the operational workflow. JanSwasthya manages external healthcare integration and reliable downstream processing.**
 
-The core path has been exercised, not only designed:
+---
 
-``` text
+## Business Scenario
+
+A healthcare organization may use ServiceNow as the central operational workflow platform while provider and healthcare systems remain outside ServiceNow.
+
+A typical flow is:
+
+```text
 ServiceNow Incident
-       |
-       | Async Business Rule
-       | RESTMessageV2 / HTTPS
-       v
-Cloudflare HTTPS endpoint
-       |
-       v
-case-integration-service :8002
+        |
+        | Async REST / HTTPS
+        v
+JanSwasthya Case Integration
+        |
+        v
+CaseReference + OutboxEvent
+        |
+        v
+Integration Worker
+       / \
+      /   \
+     v     v
+Provider  Analytics
+```
+
+The architecture deliberately separates:
+
+- ServiceNow operational workflow
+- external healthcare integration
+- provider processing
+- analytics processing
+
+This keeps provider-specific integration and reliability concerns outside the ServiceNow workflow boundary.
+
+---
+
+# Architecture
+
+```text
+                         ServiceNow
+                      Incident / Workflow
+                             |
+                             | Async Business Rule
+                             | RESTMessageV2 / HTTPS
+                             v
+                    +----------------------+
+                    | Cloudflare HTTPS     |
+                    | Dev Ingress          |
+                    +----------+-----------+
+                               |
+                               v
+                 +----------------------------+
+                 | Case Integration Service   |
+                 | :8002                      |
+                 |                            |
+                 | - Validation                |
+                 | - Idempotency               |
+                 | - Correlation ID            |
+                 | - CaseReference             |
+                 | - Outbox                    |
+                 | - Integration Attempts      |
+                 | - Dead Letter               |
+                 +-------------+--------------+
+                               |
+                               v
+                       +---------------+
+                       |   OutboxEvent  |
+                       +-------+-------+
+                               |
+                               v
+                     +-------------------+
+                     | Integration Worker|
+                     +---------+---------+
+                               |
+                 +-------------+-------------+
+                 |                           |
+                 v                           v
+        +------------------+       +------------------+
+        | Mock Provider    |       | Analytics Service|
+        | :9000            |       | :8003            |
+        +------------------+       +------------------+
+```
+
+---
+
+# Core Design
+
+The integration boundary follows a durable asynchronous processing model:
+
+```text
+ServiceNow Incident
+        |
+        v
+Async Integration
+        |
+        v
+CaseReference
+        |
+        +--> CASE_ACCEPTED_FOR_DISPATCH
+        |
+        +--> CASE_ACCEPTED_FOR_ANALYTICS
+```
+
+Provider and analytics processing are intentionally independent.
+
+An analytics failure should not force provider work to be redelivered.
+
+---
+
+# Services
+
+## 1. Master Data Service — `:8001`
+
+Owns healthcare business master data:
+
+```text
+Hospital Group
+      |
+      v
+Hospital
+      |
+      v
+Facility
+      |
+      v
+Department
+      |
+      v
+Healthcare Service
+```
+
+The hierarchy provides business ownership, operational location and healthcare service context.
+
+---
+
+## 2. Case Integration Service — `:8002`
+
+The main integration boundary.
+
+Responsibilities include:
+
+- request validation
+- idempotency
+- payload hash validation
+- correlation ID handling
+- CaseReference persistence
+- atomic outbox persistence
+- integration message tracking
+- integration attempt tracking
+- bounded retry handling
+- dead-letter persistence
+
+---
+
+## 3. Analytics Service — `:8003`
+
+Provides analytics-oriented processing.
+
+The application keeps an explicit repository/port boundary so the analytics domain is not tightly coupled to a specific persistence implementation.
+
+---
+
+## 4. Integration Worker
+
+Consumes durable downstream work and routes independent events through separate adapters.
+
+```text
+Outbox
+   |
+   v
+Worker
+ /   \
+v     v
+Provider  Analytics
+```
+
+---
+
+## 5. Mock Provider System — `:9000`
+
+Represents an external healthcare/provider system for local integration and failure-path testing.
+
+This is intentionally a mock downstream system.
+
+The ServiceNow → JanSwasthya integration itself has been verified against a real ServiceNow PDI.
+
+---
+
+# Reliability Design
+
+Healthcare integrations need protection against duplicate, lost and repeatedly failing messages.
+
+## Idempotency
+
+Requests use:
+
+```text
+Idempotency-Key
+```
+
+The system also validates the payload hash associated with the idempotency key.
+
+This prevents a retry from silently creating another case and prevents the same key from being reused with a different payload.
+
+---
+
+## Correlation ID
+
+Optional:
+
+```text
+X-Correlation-ID
+```
+
+The correlation ID provides traceability across:
+
+```text
+ServiceNow
+    |
+JanSwasthya
+    |
+Worker
+   / \
+Provider Analytics
+```
+
+---
+
+## Atomic Outbox
+
+Case creation and the corresponding event publication intent are persisted together.
+
+```text
+Database Transaction
        |
        +--> CaseReference
        |
        +--> OutboxEvent
-               |
-               +--> CASE_ACCEPTED_FOR_DISPATCH
-               |
-               +--> CASE_ACCEPTED_FOR_ANALYTICS
-                              |
-                              v
-                    integration-worker
-                       |             |
-                       v             v
-                Mock Provider   analytics-service :8003
-                                     |
-                                     v
-                             healthcare_case_fact
 ```
 
-The ServiceNow-to-API leg was verified using an actual Incident record.
-The resulting `case_reference` row was verified in MariaDB/Adminer.
+This reduces the risk of losing downstream work between database persistence and event publication.
 
-## Current status
+---
 
-  Capability                             Status
-  -------------------------------------- --------------
-  Repository / Docker baseline           COMPLETE
-  Master Data Service                    COMPLETE
-  Case Integration Service               COMPLETE
-  Idempotency                            COMPLETE
-  Correlation IDs                        COMPLETE
-  Transactional Outbox                   COMPLETE
-  Integration audit records              COMPLETE
-  Bounded retries                        COMPLETE
-  Dead-letter persistence                COMPLETE
-  Mock Provider System                   COMPLETE
-  Analytics Service                      COMPLETE
-  Analytics persistence port             COMPLETE
-  Analytics end-to-end fan-out           COMPLETE
-  ServiceNow Incident → JanSwasthya      **VERIFIED**
-  ServiceNow lifecycle synchronization   NEXT
-  True exponential backoff               HARDENING
-  Tenant authorization hardening         PENDING
-  Production authentication              PENDING
-  MCP server                             FUTURE
+## Independent Downstream Events
 
-## Domain / tenant model
+Two logical downstream events are maintained:
 
-The primary tenant is the **Hospital Group**.
-
-``` text
-Hospital Group
-    |
-    +-- Hospital
-          |
-          +-- Facility
-                |
-                +-- Department
-                      |
-                      +-- Healthcare Service
-```
-
-Tenant context should ultimately be derived from authenticated identity
-and server-side authorization rather than trusted directly from a
-client-supplied `tenant_id`.
-
-## Services
-
-### Master Data Service
-
-``` text
-services/master-data-service/
-```
-
-Owns:
-
--   Hospital Group
--   Hospital
--   Facility
--   Department
--   Healthcare Service
-
-Port: `8001`
-
-### Case Integration Service
-
-``` text
-services/case-integration-service/
-```
-
-Owns the healthcare case ingestion boundary and integration reliability
-state.
-
-Responsibilities:
-
--   request validation
--   idempotency
--   correlation ID handling
--   `CaseReference` persistence
--   atomic outbox creation
--   integration message/attempt auditing
--   dead-letter persistence
-
-Port: `8002`
-
-Endpoint:
-
-``` http
-POST /api/v1/cases
-```
-
-Required header:
-
-``` text
-Idempotency-Key
-```
-
-Optional header:
-
-``` text
-X-Correlation-ID
-```
-
-### Analytics Service
-
-``` text
-services/analytics-service/
-```
-
-Port: `8003`
-
-Endpoints:
-
-``` http
-GET  /health
-POST /api/v1/analytics/cases
-```
-
-Primary table:
-
-``` text
-healthcare_case_fact
-```
-
-The analytics service uses a repository/port boundary so the application
-service does not depend directly on MariaDB-specific persistence.
-
-### Integration Worker
-
-``` text
-workers/integration-worker/
-```
-
-The existing worker is reused for downstream processing.
-
-It routes:
-
-``` text
+```text
 CASE_ACCEPTED_FOR_DISPATCH
 CASE_ACCEPTED_FOR_ANALYTICS
 ```
 
-through separate adapters.
+They are processed independently.
 
-### Mock Provider System
+Therefore:
 
-``` text
-mock-systems/mock-provider-system/
+```text
+Provider Event
+     |
+     +--> PROCESSED
+
+Analytics Event
+     |
+     +--> RETRY
+     +--> RETRY
+     +--> RETRY
+     +--> DEAD_LETTER
 ```
 
-Port: `9000`
+An analytics outage does not require provider work to be retried.
 
-It provides a synthetic external healthcare provider boundary and
-controlled failure simulation for reliability testing.
+---
 
-## Reliability architecture
+## Retry and Dead Letter
 
-The case transaction creates two independent downstream events:
+Current retries are bounded.
 
-``` text
-CASE_ACCEPTED_FOR_DISPATCH
-CASE_ACCEPTED_FOR_ANALYTICS
-```
+When retry attempts are exhausted, failed work is persisted as dead-letter state rather than silently discarded.
 
-This is deliberate.
+### Current limitation
 
-If analytics is unavailable while provider delivery succeeds:
+The current retry implementation is bounded but does not claim full production-grade exponential backoff.
 
-``` text
-Provider event   -> PROCESSED
-Analytics event  -> RETRY -> DEAD_LETTER
-```
+Exponential backoff is a production hardening item.
 
-The provider operation does not need to be repeated because analytics
-failed.
+---
 
-Current reliability mechanisms:
+# ServiceNow Integration
 
--   Idempotency keys
--   Payload hash validation for idempotency-key reuse
--   Correlation IDs
--   Atomic outbox writes
--   Integration messages
--   Integration attempts
--   Bounded retries
--   Dead-letter persistence
--   Independent downstream event state
+## Current Integration
 
-**Known hardening item:** the current worker retry mechanism is bounded
-but does not yet implement true exponential backoff.
+The current ServiceNow integration uses:
 
-## Analytics persistence portability
-
-Current:
-
-``` text
-AnalyticsService
-      |
-      v
-CaseAnalyticsRepository
-      |
-      v
-MariaDBCaseAnalyticsRepository
-      |
-      v
-MariaDB
-```
-
-Future adapters can target PostgreSQL or an analytical store such as
-ClickHouse.
-
-The architectural goal is portability at the application boundary; it
-does **not** claim that a database migration is zero-effort.
-
-## Database
-
-The MVP intentionally uses one shared MariaDB instance.
-
-This is a learning and implementation simplification. Logical service
-boundaries are maintained even though the physical database is shared.
-
-Operational migration history:
-
-``` text
-2a5d2593a683  create_master_data_tables
-f7629d3baf9f  add_case_reference_and_idempotency
-0e943d03e523  add_outbox_and_reliability_tables
-```
-
-Analytics has an independent Alembic version table:
-
-``` text
-analytics_alembic_version
-```
-
-Analytics migration:
-
-``` text
-b8b6e31bf5a3_create_healthcare_case_fact
-```
-
-## ServiceNow integration --- verified
-
-ServiceNow is the operational case system of record.
-
-The current PDI integration uses:
-
-``` text
+```text
 ServiceNow Incident
-    |
-    | Async Business Rule
-    v
-RESTMessageV2
-    |
-    | HTTPS
-    v
-Cloudflare Quick Tunnel
-    |
-    v
-case-integration-service
+        |
+        v
+Async Business Rule
+        |
+        v
+RESTMessageV2 / HTTPS
+        |
+        v
+JanSwasthya
 ```
 
-### Verified live Incident
+The asynchronous trigger keeps the ServiceNow operational transaction decoupled from downstream provider/analytics processing.
 
-A real ServiceNow Incident was created with:
+---
 
-``` text
+# Verified ServiceNow Integration
+
+A real ServiceNow PDI integration has been verified.
+
+Verified Incident:
+
+```text
 INC0010002_BHANU_ASYNC
 ```
 
-The ServiceNow activity stream recorded:
+The documented verification shows:
 
-``` text
-JanSwasthya integration
-HTTP Status: 201
+```text
+ServiceNow Incident
+        |
+        v
+JanSwasthya
+        |
+        v
+HTTP 201
+        |
+        v
+CaseReference persisted
 ```
 
-The API response contained:
+The corresponding database verification is documented in:
 
-``` text
-status: ACCEPTED
-case_number: INC0010002_BHANU_ASYNC
-```
-
-and a JanSwasthya `case_reference_id`.
-
-The same Incident was then visible in MariaDB/Adminer in the
-`case_reference` table with:
-
-``` text
-case_number:
-INC0010002_BHANU_ASYNC
-
-servicenow_sys_id:
-2010e83d3d7471011e7faa6feaad3c2
-
-tenant_id:
-830f21a0-3285-4697-b570-ccb0bdf33191
-
-hospital_id:
-3abf0419-1f03-4c98-8f2e-012a581e7497
-```
-
-This is the strongest current integration proof because it demonstrates
-an actual ServiceNow record crossing the integration boundary and being
-persisted by JanSwasthya Connect.
-
-A second ServiceNow-side script invocation was also successfully tested
-earlier using `RESTMessageV2`.
-
-See:
-
-``` text
+```text
 docs/07_SERVICENOW_INTEGRATION_VERIFICATION.md
 ```
 
-for the reproducible contract, configuration, evidence, and current
-limitations.
+This is the strongest current evidence that the ServiceNow → JanSwasthya integration boundary is working.
 
-## Cloudflare development endpoint
+---
 
-For the current local development setup:
+# ServiceNow Business Scope
 
-``` text
-ServiceNow
+The ServiceNow scope is intentionally focused on a coherent healthcare operational workflow.
+
+## Core capabilities
+
+- Incident
+- Problem
+- Change
+- CMDB basics
+- Flow Designer
+- REST / asynchronous integration
+
+## Integration learning
+
+- RESTMessageV2
+- IntegrationHub basics
+- MID Server concepts
+- OAuth2 concepts
+- SOAP integration concepts
+- Kafka/event-streaming concepts
+
+Not every technology listed above is implemented in this MVP.
+
+The purpose is to understand **when and why** each capability should be used.
+
+---
+
+# Incident → Problem → Change
+
+The ServiceNow operational lifecycle can be understood as:
+
+```text
+Incident
+   |
+   | recurring / underlying cause?
+   v
+Problem
+   |
+   | corrective modification required?
+   v
+Change
+```
+
+Simple interpretation:
+
+```text
+Incident = Something is broken.
+
+Problem  = Why does this keep happening?
+
+Change   = How will we safely modify the environment?
+```
+
+This gives the project a real business workflow instead of treating ServiceNow only as an API source.
+
+---
+
+# CMDB and Business Master Data
+
+JanSwasthya has its own healthcare business hierarchy:
+
+```text
+Hospital Group
     |
-    v
-Cloudflare Quick Tunnel
+Hospital
     |
-    v
-Windows host :8002
+Facility
     |
-    v
-Docker case-integration-service
+Department
+    |
+Healthcare Service
 ```
 
-The Quick Tunnel is intentionally a development mechanism. It is not
-treated as a production ingress design.
+This should not automatically be treated as the ServiceNow CMDB.
 
-## Docker runtime
+A useful distinction is:
 
-Compose services:
+```text
+Business Master Data
+        |
+        +--> Hospital
+        +--> Facility
+        +--> Department
+        +--> Healthcare Service
 
-``` text
-mariadb
-mock-provider-system
-integration-worker
-master-data-service
-adminer
-analytics-service
-case-integration-service
+CMDB
+        |
+        +--> Technical / Operational CIs
+        +--> Relationships
 ```
 
-Ports:
+Only entities with clear operational dependency, impact or configuration-management value should be represented as CIs.
 
-``` text
-Master Data Service       :8001
-Case Integration Service  :8002
-Analytics Service        :8003
-Mock Provider System      :9000
-Adminer                   :8080
+---
+
+# Flow Designer
+
+Flow Designer is the preferred learning area for visual ServiceNow workflow automation.
+
+Conceptually:
+
+```text
+Incident Created
+       |
+       v
+Condition
+       |
+       v
+Action
+       |
+       v
+Notify / Integrate
 ```
 
-MariaDB remains internal to the Docker network.
+Business workflow should remain understandable and maintainable.
 
-## Verification philosophy
+---
 
-The repository is intended to show both **implementation** and
-**evidence**.
+# RESTMessageV2 vs IntegrationHub
 
-Useful evidence should be reproducible from:
+Both are relevant, but they solve slightly different problems.
 
-1.  source code and configuration in the repository
-2.  database state visible through MariaDB/Adminer
-3.  ServiceNow Incident activity and configuration
-4.  API responses
-5.  integration/outbox audit state
-6.  automated tests where available
+| RESTMessageV2 | IntegrationHub |
+|---|---|
+| Direct REST invocation | Reusable integration capability |
+| Lower-level control | Workflow-oriented |
+| Custom REST APIs | Connectors/actions |
+| Precise API configuration | Reuse and governance |
 
-The latest ServiceNow verification is documented rather than presented
-as an architectural assumption.
+Not every REST API call needs to be forced through IntegrationHub.
 
-## Testing
+The choice should follow the actual integration requirement.
 
-Current automated coverage includes service-level tests for:
+---
 
--   analytics health
--   analytics fact creation
--   existing fact update
--   fact ID preservation
--   mock provider behavior
+# Integration Patterns — When to Use What?
 
-Runtime verification has also covered:
+## REST
 
--   case creation
--   idempotency
--   correlation propagation
--   outbox creation
--   provider dispatch
--   analytics dispatch
--   analytics fact persistence
--   analytics failure → retry → dead-letter behavior
--   ServiceNow Incident → Case Integration Service
+Use when a direct API boundary is appropriate.
 
-## Known limitations
+Current ServiceNow → JanSwasthya integration follows this model.
 
-These are deliberately visible rather than hidden:
+---
 
--   ServiceNow tenant/hospital/service mapping is currently hardcoded
-    for the MVP demonstration.
--   The case API still accepts `tenant_id` in the request model;
-    authenticated tenant derivation is a security-hardening task.
--   Current worker retries are bounded but not true exponential backoff.
--   Cloudflare Quick Tunnel is temporary and unauthenticated.
--   ServiceNow authentication hardening (OAuth 2.0 / least privilege) is
-    still pending.
--   Async Business Rule implementation is a working MVP integration
-    mechanism; a production design should keep the trigger thin and
-    avoid unnecessary `current.update()` patterns.
--   Analytics reconciliation and dashboard read models are not complete.
--   MCP is not implemented.
+## Async Messaging
 
-## Architecture style
+Use when downstream processing should not block the initiating operational workflow.
 
-The project uses a pragmatic Hexagonal / Ports-and-Adapters approach:
+Current JanSwasthya design uses asynchronous processing for this reason.
 
-``` text
-API
- |
- v
-Application Service
- |
- v
-Domain
- |
- v
-Port
- |
- v
-Infrastructure Adapter
+---
+
+## MID Server
+
+Relevant when ServiceNow needs to communicate with private/on-premise systems that are not directly reachable from the ServiceNow environment.
+
+```text
+ServiceNow Cloud
+       |
+       v
+   MID Server
+       |
+       v
+Private Network
 ```
 
-The intent is to preserve meaningful boundaries without introducing
-infrastructure that the MVP does not need.
+It is not required for the current publicly reachable HTTPS development endpoint.
 
-## Project structure
+---
 
-``` text
+## SOAP
+
+Relevant for legacy enterprise systems that expose SOAP interfaces.
+
+REST should not be forced when the target system is inherently SOAP-based.
+
+---
+
+## Kafka
+
+Useful when the architecture requires:
+
+- high event volume
+- many independent consumers
+- event streaming
+- replay capabilities
+- durable streaming infrastructure
+
+Kafka is not required by the current MVP because Outbox + Worker already provides the required processing model.
+
+---
+
+## API Gateway / iPaaS
+
+Useful when an enterprise requires centralized:
+
+- API governance
+- routing
+- transformation
+- security
+- integration management
+
+Additional middleware should be introduced only when those requirements justify its operational complexity.
+
+---
+
+## OAuth2
+
+Relevant for production-grade API authorization.
+
+The current MVP does not claim a complete production OAuth2 security implementation.
+
+---
+
+# Business Entity Model
+
+The healthcare domain is represented as:
+
+```text
+Hospital Group
+      |
+Hospital
+      |
+Facility
+      |
+Department
+      |
+Healthcare Service
+```
+
+Conceptual ServiceNow mapping:
+
+| JanSwasthya | ServiceNow Concept |
+|---|---|
+| Hospital Group | Organization / tenant boundary |
+| Hospital | Organization / business unit |
+| Facility | Location |
+| Department | Department / operational ownership |
+| Healthcare Service | Business/service context |
+| Technical system | Configuration Item |
+| Operational issue | Incident |
+
+This is a conceptual mapping, not a forced one-to-one implementation.
+
+---
+
+# Tenant Model
+
+Hospital Group provides a natural logical tenant boundary.
+
+Conceptually:
+
+```text
+Tenant A
+   |
+   +--> Hospitals
+   +--> Facilities
+   +--> Departments
+   +--> Services
+
+Tenant B
+   |
+   +--> Hospitals
+   +--> Facilities
+   +--> Departments
+   +--> Services
+```
+
+The current MVP uses simplified tenant mapping.
+
+A production implementation should derive tenant context from authenticated identity rather than blindly trusting a client-provided tenant ID.
+
+---
+
+# Repository Structure
+
+```text
 janswasthya-connect/
-|
-+-- services/
-|   +-- master-data-service/
-|   +-- case-integration-service/
-|   +-- analytics-service/
-|
-+-- mock-systems/
-|   +-- mock-provider-system/
-|
-+-- workers/
-|   +-- integration-worker/
-|
-+-- docs/
-|   +-- 06_CURRENT_STATE.md
-|   +-- 07_SERVICENOW_INTEGRATION_VERIFICATION.md
-|
-+-- tests/
-+-- docker-compose.yml
-+-- README.md
+│
+├── README.md
+│
+├── docs/
+│   ├── 06_CURRENT_STATE.md
+│   ├── 07_SERVICENOW_INTEGRATION_VERIFICATION.md
+│   ├── 08_BUSINESS_USE_CASE.md
+│   ├── 09_SERVICENOW_MODULE_MAP.md
+│   ├── 10_BUSINESS_ENTITY_MODEL.md
+│   └── FAQ.md
+│
+├── master-data-service/
+├── case-integration-service/
+├── analytics-service/
+├── integration-worker/
+└── mock-provider/
 ```
 
-## Documentation
+---
 
-  --------------------------------------------------------------------------------------
-  Document                                           Purpose
-  -------------------------------------------------- -----------------------------------
-  `docs/06_CURRENT_STATE.md`                         Current implementation checkpoint,
-                                                     verified state, limitations, and
-                                                     next work
+# Documentation
 
-  `docs/07_SERVICENOW_INTEGRATION_VERIFICATION.md`   Live ServiceNow integration
-                                                     configuration and evidence
+| Document | Purpose |
+|---|---|
+| `docs/06_CURRENT_STATE.md` | Current implementation and architecture state |
+| `docs/07_SERVICENOW_INTEGRATION_VERIFICATION.md` | Real ServiceNow PDI integration evidence |
+| `docs/08_BUSINESS_USE_CASE.md` | Business scenario and system responsibilities |
+| `docs/09_SERVICENOW_MODULE_MAP.md` | ServiceNow module and integration mapping |
+| `docs/10_BUSINESS_ENTITY_MODEL.md` | Healthcare business entity hierarchy and ServiceNow mapping |
+| `docs/FAQ.md` | Architecture and interview-oriented questions and answers |
 
-  `README.md`                                        Project overview and architecture
-                                                     entry point
-  --------------------------------------------------------------------------------------
+---
 
-The documentation directory is intentionally being brought back into
-sync with the implementation. New architecture/ADR documents should be
-added as the corresponding design decisions are finalized rather than
-creating speculative documentation.
+# Local Services
 
-## Next steps
+| Component | Port | Purpose |
+|---|---:|---|
+| Master Data Service | `8001` | Healthcare master data |
+| Case Integration Service | `8002` | External case integration boundary |
+| Analytics Service | `8003` | Analytics processing |
+| Mock Provider | `9000` | External provider simulation |
 
-1.  ServiceNow lifecycle synchronization.
-2.  Improve worker retry/backoff semantics.
-3.  Add stronger automated worker integration tests.
-4.  Add analytics aggregation and reconciliation.
-5.  Harden tenant authorization.
-6.  Replace development ingress/authentication with production-grade
-    controls.
-7.  Define MCP tools over stable application services.
-8.  Complete ADR and security/threat-model documentation.
+---
+
+# API Contract
+
+The case integration API expects an idempotency key.
+
+Required:
+
+```text
+Idempotency-Key
+```
+
+Optional:
+
+```text
+X-Correlation-ID
+```
+
+The idempotency key protects the integration boundary from duplicate processing during retries.
+
+---
+
+# Current Status
+
+## Verified
+
+- ServiceNow Incident → JanSwasthya integration
+- Real ServiceNow PDI request
+- HTTP `201` response
+- CaseReference persistence
+- Idempotency handling
+- Payload hash validation
+- Correlation ID support
+- Atomic outbox persistence
+- Independent provider/analytics events
+- Bounded retry behavior
+- Dead-letter persistence
+- Analytics failure → retry → dead-letter scenario
+
+## Learning / Next
+
+- Incident → Problem → Change lifecycle
+- CMDB basics
+- Flow Designer
+- IntegrationHub basics
+- ServiceNow business workflow modeling
+- Evidence/screenshots for the above
+
+## Future / Hardening
+
+- lifecycle/status synchronization where justified
+- production authentication/authorization
+- authenticated tenant derivation
+- production ingress
+- exponential backoff
+- stronger observability
+- reconciliation
+- operational replay controls
+- capacity/performance testing
+- disaster recovery considerations
+
+---
+
+# Known Limitations
+
+This is an MVP and intentionally does not claim every enterprise capability.
+
+Current limitations include:
+
+1. Retry is bounded but not full exponential backoff.
+2. Tenant authorization requires production hardening.
+3. Production authentication/OAuth2 and least-privilege controls require further work.
+4. Cloudflare Quick Tunnel is a development ingress mechanism and is not a production deployment model.
+5. ServiceNow tenant/hospital/service mapping is simplified for the MVP.
+6. Analytics reconciliation and operational read models are not complete.
+7. Advanced infrastructure such as Kafka/MID Server is not implemented because the current requirement does not justify it.
+
+---
+
+# Architecture Principles
+
+## 1. Requirement before technology
+
+> Choose technology because the business or system requirement needs it, not because it is a popular architecture keyword.
+
+## 2. Keep workflow and integration boundaries clear
+
+ServiceNow owns operational workflow.
+
+JanSwasthya owns external integration processing.
+
+## 3. Prefer reliable simple designs
+
+Outbox + Worker is sufficient for the current event-processing requirement.
+
+Kafka should not be introduced without a requirement that justifies it.
+
+## 4. Separate failure domains
+
+Provider and Analytics processing are independent.
+
+One downstream failure should not unnecessarily impact another.
+
+## 5. Be explicit about production gaps
+
+Implemented MVP capabilities and production hardening requirements are documented separately.
+
+---
+
+# Next Steps
+
+The next phase is intentionally focused rather than adding more infrastructure.
+
+1. Model the healthcare business scenario in the ServiceNow PDI.
+2. Work through the Incident → Problem → Change lifecycle.
+3. Add basic CMDB/service relationship understanding.
+4. Build a small Flow Designer workflow around the business scenario.
+5. Understand and demonstrate the IntegrationHub approach where it provides clear value.
+6. Evaluate lifecycle/status synchronization between JanSwasthya and ServiceNow if required by the business flow.
+7. Capture real ServiceNow screenshots and verification evidence.
+8. Keep advanced patterns such as MID Server, Kafka, SOAP and API Gateway/iPaaS as architecture knowledge unless an actual requirement justifies implementation.
+
+---
+
+# Summary
+
+JanSwasthya Connect demonstrates a practical healthcare integration architecture:
+
+```text
+ServiceNow
+   |
+   | Async REST
+   v
+JanSwasthya
+   |
+   | Durable Outbox
+   v
+Integration Worker
+   |
+   +--> Provider
+   |
+   +--> Analytics
+```
+
+The key architectural ideas demonstrated are:
+
+- clear system boundaries
+- asynchronous integration
+- idempotency
+- correlation IDs
+- atomic outbox
+- independent downstream events
+- bounded retries
+- dead-letter persistence
+- healthcare business entity modeling
+- ServiceNow operational workflow integration
+
+The project deliberately avoids adding technology for technology's sake.
